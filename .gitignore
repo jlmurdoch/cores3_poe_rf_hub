@@ -1,0 +1,19 @@
+
+build
+.devcontainer
+.vscode
+
+# ESP-IDF specific build outputs
+sdkconfig.old
+sdkconfig
+
+# ESP-IDF dependencies
+# For older versions or manual component management
+/components/.idf/
+**/components/.idf/
+# For modern ESP-IDF component manager
+managed_components/
+
+
+.clangd
+compile_commands.json
