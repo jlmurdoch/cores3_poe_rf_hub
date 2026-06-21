@@ -36,6 +36,8 @@
 #include "driver/rtc_io.h"
 #include "soc/rtc_cntl_reg.h"
 
+#include "lvgl_ui/lvgl_ui.h"
+
 // I2C Basics
 #define PIN_NUM_I2C_SDA 12
 #define PIN_NUM_I2C_SCL 11
@@ -99,8 +101,6 @@ volatile bool gpio_rssi_868_flag = 0;
 extern const uint8_t bin_start[] asm("_binary_ulp_data_433_bin_start");
 extern const uint8_t bin_end[]   asm("_binary_ulp_data_433_bin_end");
 
-
-static const char *TAG = "CORES3_SPI_TEST";
 static esp_event_handler_instance_t eth_ev_instance = NULL;
 
 // Event handler for Ethernet events
@@ -264,67 +264,6 @@ esp_eth_handle_t *setup_w5500poe(esp_lcd_spi_bus_handle_t spi_host_id) {
     ESP_ERROR_CHECK(err);
 
     return eth_handle;
-}
-
-/*
- ******** LCD Panel ********
- */
-esp_lcd_panel_handle_t setup_lcd_panel(esp_lcd_spi_bus_handle_t spi_host_id) 
-{
-    esp_err_t err;
-
-    // Set up the LCD panel SPI 244 x  360 (87840 x )
-    esp_lcd_panel_io_handle_t io_handle = NULL;
-    esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num = PIN_NUM_LCD_DC,
-        .cs_gpio_num = PIN_NUM_LCD_CS,
-        .pclk_hz = SPI_MASTER_FREQ_9M, 
-        .spi_mode = 0,
-        .trans_queue_depth = 1,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-    };
-    
-    err = esp_lcd_new_panel_io_spi(spi_host_id, &io_config, &io_handle);
-    ESP_ERROR_CHECK(err);
-
-    // Set up a LCD panel handle for use in operations
-    esp_lcd_panel_handle_t panel_handle = NULL;
-    esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = -1, 
-        .bits_per_pixel = 16,
-    };
-    err = esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle);
-    ESP_ERROR_CHECK(err);
-
-    // Obligatory LCD panel reset
-    printf("Reset LCD\n");
-    err = esp_lcd_panel_reset(panel_handle);
-    ESP_ERROR_CHECK(err);
-    vTaskDelay(150 / portTICK_PERIOD_MS);
-
-    // Initialise LCD panel per its type
-    printf("Initialise LCD\n");
-    err = esp_lcd_panel_init(panel_handle);
-    ESP_ERROR_CHECK(err);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-
-    // Set the border offsets
-    err = esp_lcd_panel_set_gap(panel_handle, LCD_H_OFF, LCD_V_OFF);
-    ESP_ERROR_CHECK(err);
-
-    // Bit-wise invert the colour data
-    err = esp_lcd_panel_invert_color(panel_handle, true);
-    ESP_ERROR_CHECK(err);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-
-    // Turn on the display
-    printf("Turn on LCD\n");
-    err = esp_lcd_panel_disp_on_off(panel_handle, true);
-    ESP_ERROR_CHECK(err);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-
-    return panel_handle;
 }
 
 /*
@@ -497,7 +436,6 @@ void app_main(void)
     esp_eth_handle_t *w5500poe_handle = setup_w5500poe(SPI_HOST_ID);
     assert(w5500poe_handle);
 
-
     /*
      * SX1278
      */
@@ -567,16 +505,14 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     // LCD setup
-    esp_lcd_panel_handle_t lcdpanel_handle = setup_lcd_panel(SPI_HOST_ID);
-    assert(lcdpanel_handle);  
-    uint8_t *canvas = heap_caps_malloc(LCD_IMG_SIZE, MALLOC_CAP_SPIRAM);
+    lv_display_t *lvgl_disp = NULL;
+    lvgl_display_init(lvgl_disp, SPI_HOST_ID, PIN_NUM_LCD_DC, PIN_NUM_LCD_CS);
+    lvgl_port_lock(0);
+    ui_main();
+    lvgl_port_unlock();
 
     // Loop forever
     while(1) {
-        // LCD Panel - random fill
-        esp_fill_random(canvas, LCD_IMG_SIZE);
-        printf("LCD Panel: Change\n");
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(lcdpanel_handle, 0, 0, LCD_H_RES, LCD_V_RES, canvas));
         vTaskDelay(5000 / portTICK_PERIOD_MS);
 
         if (gpio_rssi_868_flag) {
