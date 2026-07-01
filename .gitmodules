@@ -1,0 +1,6 @@
+[submodule "components/otlp_nanopb/opentelemetry-proto"]
+	path = components/otlp_nanopb/opentelemetry-proto
+	url = https://github.com/open-telemetry/opentelemetry-proto
+[submodule "components/otlp_nanopb/nanopb"]
+	path = components/otlp_nanopb/nanopb
+	url = https://github.com/nanopb/nanopb
