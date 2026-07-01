@@ -17,10 +17,10 @@ Development was blocked by a [SPI Contention issue between the Ethernet and LCD]
 
 Layer | Shim          | Primary Chipset  | Function
 ------|---------------|----------|---------
-1     | [CoreS3 SE](https://docs.m5stack.com/en/core/M5CoreS3%20SE)     | [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3/) | Central compute + WiFi/BLE reception + Display
-2     | [Module LoRa433 v1.0](https://docs.m5stack.com/en/module/lora)§ | [Ai-Thinker RA-02](https://docs.ai-thinker.com/en/Ra-02/index.html) / [Semtech SX1278](https://www.semtech.com/products/wireless-rf/lora-connect/sx1278) | Weather station reception
-3     | [Module LoRa868 v1.1](https://docs.m5stack.com/en/module/Module-LoRa868_V1.1) | [Ai-Thinker RA-01H](https://docs.ai-thinker.com/en/Ra-01H/) / [Semtech SX1276](https://www.semtech.com/products/wireless-rf/lora-connect/sx1276) | Heating system reception
-4     | [Base LAN PoE v1.2](https://docs.m5stack.com/en/base/lan_poe_v12) | [WIZnet W5500](https://wiznet.io/products/ethernet-chips/w5500) | Power + Ethernet data transmission
+1 :white_square_button: | [CoreS3 SE](https://docs.m5stack.com/en/core/M5CoreS3%20SE)     | [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3/) | Central compute + WiFi/BLE reception + Display
+2 :blue_square: | [Module LoRa433 v1.0](https://docs.m5stack.com/en/module/lora)§ | [Ai-Thinker RA-02](https://docs.ai-thinker.com/en/Ra-02/index.html) / [Semtech SX1278](https://www.semtech.com/products/wireless-rf/lora-connect/sx1278) | Weather station reception
+3 :heavy_minus_sign: | [Module LoRa868 v1.1](https://docs.m5stack.com/en/module/Module-LoRa868_V1.1) | [Ai-Thinker RA-01H](https://docs.ai-thinker.com/en/Ra-01H/) / [Semtech SX1276](https://www.semtech.com/products/wireless-rf/lora-connect/sx1276) | Heating system reception
+4 :white_medium_small_square: | [Base LAN PoE v1.2](https://docs.m5stack.com/en/base/lan_poe_v12) | [WIZnet W5500](https://wiznet.io/products/ethernet-chips/w5500) | Power + Ethernet data transmission
 
 > [!IMPORTANT]
 > § The LoRa433 module has been custom-modified, rerouting pins and notably adding support for sampling raw data from DIO2.

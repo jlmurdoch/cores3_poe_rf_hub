@@ -13,6 +13,8 @@ sdkconfig
 **/components/.idf/
 # For modern ESP-IDF component manager
 managed_components/
+# generated automatically
+components/otlp_nanopb/opentelemetry
 
 
 .clangd

@@ -38,7 +38,7 @@
 #include "soc/rtc_cntl_reg.h"
 #include "soc/rtc_io_reg.h"
 #include "soc/soc_ulp.h"
-#include "config.h"
+#include "ulp_config.h"
 
     .bss
 

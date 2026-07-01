@@ -25,18 +25,28 @@
 #include "esp_eth_phy_w5500.h"
 #include "esp_eth_mac_w5500.h"
 
-#include "sx127x.h"
+// SNTP
+#include "esp_netif_sntp.h"
+
+// HTTP 
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 
 // ULP for raw radio
 #include "ulp.h"
-#include "ulp/config.h"
+#include "ulp/ulp_config.h"
 #include "ulp_data_433.h" 
 
 // RTC GPIO
 #include "driver/rtc_io.h"
 #include "soc/rtc_cntl_reg.h"
 
+#include "sx127x.h"
+
 #include "lvgl_ui/lvgl_ui.h"
+#include "otlp_climate/otlp_climate.h"
+
+#include "config.h"
 
 // I2C Basics
 #define PIN_NUM_I2C_SDA 12
@@ -511,6 +521,10 @@ void app_main(void)
     ui_main();
     lvgl_port_unlock();
 
+    // SNTP
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&sntp_config);
+
     // Loop forever
     while(1) {
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -538,15 +552,52 @@ void app_main(void)
             printf("[SX127x] 433MHz Raw Data: 0x%04x,0x%04x\n", 
                 (uint16_t)(&ulp_value)[0], (uint16_t)(&ulp_value)[1]);
 
-            uint8_t id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
+            int64_t sensor_id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
             uint8_t battery = ((uint16_t)(&ulp_value)[0] >> 7) & 0x1; 
             uint8_t manual = ((uint16_t)(&ulp_value)[0] >> 6) & 0x1;
             uint8_t channel = (((uint16_t)(&ulp_value)[0]>> 4) & 0x3) + 1;
-            float temp = ((((uint16_t)(&ulp_value)[0] & 0xF) << 16) |
+            double temp = ((((uint16_t)(&ulp_value)[0] & 0xF) << 16) |
                             (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF)) * 0.1;
-            uint8_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
-            printf("[SX127x] 433MHz Parsed Data: Id: 0x%02x, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %d%%\n", 
-                id, battery, manual, channel, temp, humidity);
+            int64_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
+            printf("[SX127x] 433MHz Parsed Data: Id: 0x%02llx, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %lld%%\n", 
+                sensor_id, battery, manual, channel, temp, humidity);
+
+            char *pb_data = (char *)malloc(sizeof(char) * 1024);
+            size_t pb_len = otlp_climate(pb_data, sensor_id, temp, humidity);
+            otlp_nanopb_print(pb_data, pb_len);
+
+            /* 
+             * If SSL verification isn't needed for testing:
+             * - CONFIG_ESP_TLS_INSECURE=y
+             * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+             * 
+             * Otherwise add:
+             * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+             * - #include "esp_crt_bundle.h"
+             * - esp_http_client_config_t http_client_config = {
+             *     .crt_bundle_attach = esp_crt_bundle_attach,
+             *   }
+             */
+            esp_http_client_config_t http_client_config = {
+                .url = OTLP_METRICS_ENDPOINT,
+                .timeout_ms = 5000,
+                .crt_bundle_attach = esp_crt_bundle_attach,
+            };
+
+            esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
+            esp_http_client_set_method(client, HTTP_METHOD_POST);
+            esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
+            esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
+            esp_http_client_set_post_field(client, pb_data, pb_len);
+            err = esp_http_client_perform(client);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
+            } else {
+                ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
+            }
+            esp_http_client_cleanup(client);
+
+            free(pb_data);
         }
     }
 }
