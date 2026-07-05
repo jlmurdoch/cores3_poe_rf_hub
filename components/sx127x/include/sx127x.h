@@ -13,4 +13,5 @@ uint8_t sx127x_read_single(spi_device_handle_t spi, uint8_t reg);
 void sx127x_write_single(spi_device_handle_t spi, uint8_t reg, uint8_t value);
 void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uint32_t frequency, uint16_t bitrate);
 void sx127x_init_fskpacket(spi_device_handle_t spi, gpio_num_t gpio_rst, uint32_t frequency, uint16_t bitrate);
+void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2, uint32_t bitrate);
 void sx127x_rxrestart(spi_device_handle_t spi);

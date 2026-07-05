@@ -115,8 +115,8 @@ void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uin
     // Low Noise Amplifier (LNA
     // sx127x_write_single(spi, 0x0C, 0x23); // Max gain + boost of 150%
 
-    // sx127x_write_single(spi, 0x0D, 0x81); // RX restart
-    // sx127x_write_single(spi, 0x1F, 0x00); // RX preamble off
+    sx127x_write_single(spi, 0x0D, 0x00); // RX restart off
+    sx127x_write_single(spi, 0x1F, 0x00); // RX preamble off
 
     // Bring SX127x out of sleep into frequency synthesis receive mode
     sx127x_write_single(spi, 0x01, 0x2C); // Set freq synth receiver mode
@@ -200,6 +200,42 @@ void sx127x_init_fskpacket(spi_device_handle_t spi, gpio_num_t gpio_rst, uint32_
     sx127x_write_single(spi, 0x01, 0x0D); // Set receiver mode
     while(!((sx127x_read_single(spi, 0x3E)) >> 7)); // Wait for Mode Ready Set  
     printf("[SX127x] OpMode: Rx\n");
+}
+
+/**
+ * @brief SX OOK Floor Threshold Optimize
+ * @param spi SPI Device Handle
+ */
+void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2, uint32_t bitrate) {
+    uint8_t glitch = 3;
+    uint8_t threshold = 0;
+    int level = 0;
+
+    while (glitch > 1) {
+        glitch = 0;
+
+        // Reset / Increment OOK threshold
+        threshold++;
+        printf("Threshold adjust: +%ddBi\n", threshold);
+        sx127x_write_single(spi, 0x15, threshold);
+
+        // Try three times to get a glitch-free reading
+        for (int x = 0; x < 3; x++) {
+            level = gpio_get_level(gpio_dio2);
+
+            // Sample 1000 times
+            for (int y = 0; y < 30; y++) {
+                // Sample changes in bits according to bitrate
+                vTaskDelay(10 / portTICK_PERIOD_MS);
+                // If high, flag as glitch
+                if (gpio_get_level(gpio_dio2) != level) {
+                    glitch++;
+                    break;
+                }
+            }
+        }
+    }
+    printf("Threshold Final: +%ddBi\n", threshold);
 }
 
 

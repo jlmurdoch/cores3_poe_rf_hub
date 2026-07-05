@@ -1,21 +1,16 @@
-
-build
+# VS Code
 .devcontainer
 .vscode
-
-# ESP-IDF specific build outputs
-sdkconfig.old
-sdkconfig
-
-# ESP-IDF dependencies
-# For older versions or manual component management
-/components/.idf/
-**/components/.idf/
-# For modern ESP-IDF component manager
-managed_components/
-# generated automatically
-components/otlp_nanopb/opentelemetry
-
-
 .clangd
 compile_commands.json
+
+# ESP-IDF specific build outputs
+build
+sdkconfig.old
+sdkconfig
+components/.idf/
+managed_components/
+
+# Project Specific
+components/otlp_nanopb/opentelemetry 
+main/config.h
