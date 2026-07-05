@@ -5,6 +5,9 @@
 #include "esp_log.h"
 #include "esp_event.h"
 
+// Timestamping
+#include "esp_timer.h"
+
 // GPIO
 #include "driver/gpio.h"
 #include "soc/gpio_struct.h"
@@ -101,6 +104,8 @@
 #define PIN_NUM_ETH_RST     7
 #define PIN_NUM_ETH_INT     14
 
+static bool network_present = false;
+
 // Flag to indicate ULP has finished processing
 volatile bool gpio_rssi_433_flag = 0;
 volatile bool ulp_rx_done_433_flag = 0;
@@ -154,6 +159,8 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "ETHMASK:" IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "ETHGW:" IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "~~~~~~~~~~~");
+
+    network_present = true;
 }
 
 /**
@@ -173,10 +180,16 @@ static void IRAM_ATTR dio0_rssi_433_isr(void *arg) {
  */
 static void IRAM_ATTR rx_done_433_isr(void *arg) {
     spi_device_handle_t spi = (spi_device_handle_t)arg;
-    if (ulp_state == 2) {
+
+    /* 
+     * state = 0; RUNNING
+     * state = 1; RXOK
+     * state = 2; FAIL
+     */
+    if (ulp_state == 1) {
         ulp_rx_done_433_flag = 1;
     }
-    ulp_state = 0;
+    ulp_state = 0; // Set back to running
     sx127x_rxrestart(spi);
 }  
 
@@ -469,8 +482,9 @@ void app_main(void)
 
     sx127x_init_ookcontinuous(sx1278_433_spi, PIN_NUM_433_RST, 433910000, 2000);
 
-    // SX1278 433MHz DATA GPIO - Read by ULP
+    // SX1278 433MHz DATA GPIO - Read by ULP, but calibrate first
     gpio_set_direction(PIN_NUM_433_DIO2, GPIO_MODE_INPUT);
+    sx127x_ookfixthresh_calibrate(sx1278_433_spi, PIN_NUM_433_DIO2, 2000);
 
     // SX1278 433MHz RSSI GPIO - ISR for ULP RX Complete
     gpio_set_direction(GPIO_RX_DONE, GPIO_MODE_INPUT);
@@ -545,19 +559,21 @@ void app_main(void)
             printf("[SX127x] 433MHz RSSI Detected\n");
             gpio_rssi_433_flag = 0;
         }
+
         if (ulp_rx_done_433_flag) {
             ulp_rx_done_433_flag = 0;
 
             // Print the RFM ULP variables
-            printf("[SX127x] 433MHz Raw Data: 0x%04x,0x%04x\n", 
+            printf("[SX127x] 433MHz Raw Data: %lld - 0x%04x,0x%04x\n", 
+                esp_timer_get_time() / 1000000,
                 (uint16_t)(&ulp_value)[0], (uint16_t)(&ulp_value)[1]);
 
             int64_t sensor_id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
             uint8_t battery = ((uint16_t)(&ulp_value)[0] >> 7) & 0x1; 
             uint8_t manual = ((uint16_t)(&ulp_value)[0] >> 6) & 0x1;
             uint8_t channel = (((uint16_t)(&ulp_value)[0]>> 4) & 0x3) + 1;
-            double temp = ((((uint16_t)(&ulp_value)[0] & 0xF) << 16) |
-                            (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF)) * 0.1;
+            double temp = (float)((((((uint16_t)(&ulp_value)[0] & 0x7) << 8) | (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF))
+                            ^ (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) + (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) * 0.1;
             int64_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
             printf("[SX127x] 433MHz Parsed Data: Id: 0x%02llx, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %lld%%\n", 
                 sensor_id, battery, manual, channel, temp, humidity);
@@ -566,36 +582,38 @@ void app_main(void)
             size_t pb_len = otlp_climate(pb_data, sensor_id, temp, humidity);
             otlp_nanopb_print(pb_data, pb_len);
 
-            /* 
-             * If SSL verification isn't needed for testing:
-             * - CONFIG_ESP_TLS_INSECURE=y
-             * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
-             * 
-             * Otherwise add:
-             * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-             * - #include "esp_crt_bundle.h"
-             * - esp_http_client_config_t http_client_config = {
-             *     .crt_bundle_attach = esp_crt_bundle_attach,
-             *   }
-             */
-            esp_http_client_config_t http_client_config = {
-                .url = OTLP_METRICS_ENDPOINT,
-                .timeout_ms = 5000,
-                .crt_bundle_attach = esp_crt_bundle_attach,
-            };
+            if (network_present) { 
+                /* 
+                * If SSL verification isn't needed for testing:
+                * - CONFIG_ESP_TLS_INSECURE=y
+                * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+                * 
+                * Otherwise add:
+                * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+                * - #include "esp_crt_bundle.h"
+                * - esp_http_client_config_t http_client_config = {
+                *     .crt_bundle_attach = esp_crt_bundle_attach,
+                *   }
+                */
+                esp_http_client_config_t http_client_config = {
+                    .url = OTLP_METRICS_ENDPOINT,
+                    .timeout_ms = 5000,
+                    .crt_bundle_attach = esp_crt_bundle_attach,
+                };
 
-            esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
-            esp_http_client_set_method(client, HTTP_METHOD_POST);
-            esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
-            esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
-            esp_http_client_set_post_field(client, pb_data, pb_len);
-            err = esp_http_client_perform(client);
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
-            } else {
-                ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
+                esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
+                esp_http_client_set_method(client, HTTP_METHOD_POST);
+                esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
+                esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
+                esp_http_client_set_post_field(client, pb_data, pb_len);
+                err = esp_http_client_perform(client);
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
+                } else {
+                    ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
+                }
+                esp_http_client_cleanup(client);
             }
-            esp_http_client_cleanup(client);
 
             free(pb_data);
         }

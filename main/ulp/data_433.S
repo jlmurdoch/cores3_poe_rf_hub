@@ -50,6 +50,9 @@ state:
 value:  
     .long 0             // ulp_value[0]
     .long 0             // ulp_value[1]
+    .global bits
+bits:
+    .long 0
 
 last_val:               // Used for double-checking
     .long 0
@@ -58,7 +61,20 @@ last_val:               // Used for double-checking
     .text
 
     .global entry
-entry:                  // (42 cycles)
+entry:                                    // Reset everything
+    move r3, 0          // Reset bit count
+    move r0, bits
+    st r3, r0, 0 
+
+    move r1, 0x0        // Reset all vars
+    move r0, value      // r0 <- var address
+    st r1, r0, 0        // r1 -> r0 data save
+    move r0, value      // r0 <- var address
+    st r1, r0, 4        // r1 -> r0 data save
+
+    stage_rst
+
+read:                   // (42 cycles)
                         // (8) Read GPIO low bank
     READ_RTC_REG(RTC_GPIO_IN_REG, RTC_GPIO_IN_NEXT_S, 16)
     rsh r0, r0, DIO2    // (6) Shift to GPIO
@@ -69,41 +85,34 @@ entry:                  // (42 cycles)
     jump loop, eq       // (4) If not an edge, loop
 
 edge:                   // Level change
-    jumps flag, 240, GE // Timeout    (>4.8ms)
     jumps lead, 30,  LE // Lead pulse (<0.6ms)
     jumps data, 120, LE // Data pulse (<2.4ms)
-
-sync:                   // Sync pulse (<4.8ms)
-    move r0, r3         // Get bit count
-    jumpr rxok, 36, EQ  // Quit if 36 bits then sync bit
-
-reset:                  // Reset everything
-    move r3, 0          // Reset bit count
-    move r1, 0          // Reset all vars
-    move r0, value      // r0 <- var address
-    st r1, r0, 0        // r1 -> r0 data save
-    move r0, value      // r0 <- var address
-    st r1, r0, 4        // r1 -> r0 data save
-    move r3, 0          // Reset bit count
-
+    jump entry
+    
 lead:                   // Lead pulse - soft reset
     stage_rst           // Reset timer
+    move r0, r3         // Get bit count
+    jumpr rxok, 36, EQ  // Quit if 36 bits
     jump loop           // Continue
 
 loop:                   // (20 cycles)
-    wait 288            // (6) 288 + 20 + 42 = 350 cycles = 20ms
+    wait 300            // (6) changed from 288 to 300 for SX127x (sensitivity?)
     stage_inc 1         // (6) Timer increment
-    jumps flag, 240, GE // (4) break()
-    jump entry          // (4) Read again
+    jumps timeout, 254, GE // (4) break()
+    jump read           // (4) Read again
 
 data:                   // Valid bit
+    and r0, r2, 1       // Quit if level is 1 - data should be 0
+    jump entry, EQ      // Quit
     add r3, r3, 1       // Increment bit count
     move r0, r3         // Eval bit count
     jumpr msb, 16, LE   // MSB short [1-16]
     jumpr lsb, 24, LE   // LSB short [17-24]
     jumpr lsb, 29, GE   // LSB short [29-36]
+
+    jumps entry, 60, LT // Reset if data not one [25-28]
     stage_rst           // Ignore the 0xF = 36 to 32 bits!
-    jumpr loop, 28, LE  // Skip bits [25-28]
+    jumpr loop, 28, LE  // Skip bits if all one [25-28]
 
 msb:                    // MSB short [0-15]
     move r1, value      // r1 <- var address
@@ -131,42 +140,59 @@ lsb0:
     stage_rst           // Reset timer
     jump loop           // Continue
 
-store:
+cache:
     move r0, value
     ld r1, r0, 0
     move r0, last_val
     st r1, r0, 0        // store value[0] to last_val[0]
+
     move r0, value
     ld r1, r0, 4
     move r0, last_val   // store value[1] to last_val[1]
     st r1, r0, 4
-    jump entry
+    
+    jump read
+
+timeout:
+    move r1, 2          // Set state to TIMEOUT
+    move r0, state      // r0 <- var address
+    st r1, r0, 0        // r1 -> r0 data save 
+    jump exit
 
 rxok:
-    stage_rst           // Reset timer
+    move r0, bits
+    st r3, r0, 0 
+
+    stage_rst           // Reset timer regardless
+    move r3, 0          // Reset bit count
+
     move r0, value
     ld r1, r0, 0
     move r0, last_val
     ld r2, r0, 0
-    sub r0, r1, r2      // Compare value[0] with last value[0]
-    jumpr store, 1, ge
+    // sub r0, r1, r2      // Compare value[0] with last value[0]
+    // jumpr cache, 1, ge  // No match, cache it
+    and r0, r1, r2
+    jump cache, EQ
 
     move r0, value
     ld r1, r0, 4
     move r0, last_val
     ld r2, r0, 4
-    sub r0, r1, r2      // Compare value[1] with last value[1]
-    jumpr store, 1, ge
+    // sub r0, r1, r2      // Compare value[1] with last value[1]
+    // jumpr cache, 1, ge  // No match, cache it
+    and r0, r1, r2
+    jump cache, EQ
 
 coda:                   // loop of 3.7ms exactly
     wait 64734          // (6) 16 + 64734 = 64750 = 3.7.ms
     stage_inc 1         // (6) Increment counter
-    jumps coda, 175, LE // (4) 175 x 3.7ms = 647.5ms = 92.5ms x 7 repeats
+    jumps coda, 200, LE // (4) 175 x 3.7ms = 647.5ms = 92.5ms x 7 repeats
     move r1, 1          // Set state to RXOK
     move r0, state      // r0 <- var address
     st r1, r0, 0        // r1 -> r0 data save 
 
-flag:                   // Notify main code of state
+exit:                   // Notify main code of state
     // "Set to 1, then that pin i/o is routed to the RTC subsystem" 
     WRITE_RTC_REG(RTC_IO_TOUCH_PAD1_REG, RTC_IO_TOUCH_PAD1_MUX_SEL_S, 1, 1)
 
@@ -176,16 +202,6 @@ flag:                   // Notify main code of state
     // ULP started flag via GPIO
     WRITE_RTC_REG(RTC_GPIO_OUT_W1TS_REG, RTC_GPIO_OUT_DATA_W1TS_S + GPIO_RX_DONE, 1, 1)
 
-    move r0, state      // r0 <- var address
-    ld r1, r0, 0        // r1 <- r0 data load
-    and r1, r1, 1       // r1 == 1
-    jump exit, eq        // If already RXOK, exit 
-
-    move r0, state      // r0 <- var address
-    move r1, 2          // Set state to FAIL
-    st r1, r0, 0        // r1 -> r0 data save
-
-exit:
     // Cancel sleep
     WRITE_RTC_FIELD(RTC_CNTL_ULP_CP_TIMER_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN, 0)
     // signal low to indicate a RX has been done
