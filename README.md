@@ -36,4 +36,8 @@ Short detail at present:
 - :wireless: **SX1276 868MHz** - The SX1276 is tuned to receive packets, using [interrupts](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/intr_alloc.html) to signal to the main program when valid packets are received.
 - :zap: **W5500 PoE** - Handled by the WIZnet W5500 and main program. 
 
-
+# Changes / learnings
+- The LCD display updates can be the cause of watchdog timeouts
+- The function `esp_http_client_perform()` has to be implemented outside the main task (`app_main()`):
+  - Stack limits (`ESP_MAIN_TASK_STACK_SIZE = 3584`) cause a stack overflow. 
+  - TLS hardware acceleration (`MBEDTLS_HARDWARE_MPI`) creates `wdt timeout` issues. 
