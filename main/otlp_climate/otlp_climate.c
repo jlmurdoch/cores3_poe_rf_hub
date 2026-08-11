@@ -13,8 +13,8 @@ size_t otlp_climate(char *buf, int64_t sensor_id, double temp, int64_t rhumid) {
      * Humidity Sensor
      */
     NumberDataPoint_t humidity_data_point = {
-        .which_value = opentelemetry_proto_metrics_v1_NumberDataPoint_as_double_tag,
-        .value.as_double = rhumid,
+        .which_value = opentelemetry_proto_metrics_v1_NumberDataPoint_as_int_tag,
+        .value.as_int = rhumid,
         .time_unix_nano = time_unix_nano(),
         .attributes = &sensor_attr,
         .next = NULL,
@@ -37,8 +37,8 @@ size_t otlp_climate(char *buf, int64_t sensor_id, double temp, int64_t rhumid) {
      * Temperature Sensor
      */
     NumberDataPoint_t temperature_data_point = {
-        .which_value = opentelemetry_proto_metrics_v1_NumberDataPoint_as_int_tag,
-        .value.as_int = temp,
+        .which_value = opentelemetry_proto_metrics_v1_NumberDataPoint_as_double_tag,
+        .value.as_double = temp,
         .time_unix_nano = time_unix_nano(),
         .attributes = &sensor_attr,
         .next = NULL,
