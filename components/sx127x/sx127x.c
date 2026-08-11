@@ -96,27 +96,17 @@ void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uin
     sx127x_write_single(spi, 0x07, (raw_freq >> 8) & 0xFF);
     sx127x_write_single(spi, 0x08, raw_freq & 0xFF);
 
-    sx127x_write_single(spi, 0x10, 0x90); // RSSIThresh
-
     // Bandwidth
-    sx127x_write_single(spi, 0x12, RXBWMANT_16 << 3 | RXBWEXP_2);
-    // AFC bandwidth
-    sx127x_write_single(spi, 0x13, RXBWMANT_16 << 3 | RXBWEXP_2);
+    sx127x_write_single(spi, 0x12, RXBWMANT_24 << 3 | RXBWEXP_4);
+    // AFC Bandwidth
+    sx127x_write_single(spi, 0x13, RXBWMANT_24 << 3 | RXBWEXP_4);
 
-    // w/ Bit Sync & OOK
-    sx127x_write_single(spi, 0x14, 0x28); // Bit sync on, OOK peak, OOKPeakThresStep 0.5dB
-
-    // Data Mode & Modulation
-    sx127x_write_single(spi, 0x31, 0x00); // Continuous on, io-homecontrol off, beacon off, pkt-length = 0
-    
-    // Optional RSSI signaling
-    sx127x_write_single(spi, 0x40, 0x40); // Pin Mapping: DIO0 = RSSI
-
-    // Low Noise Amplifier (LNA
-    // sx127x_write_single(spi, 0x0C, 0x23); // Max gain + boost of 150%
-
-    sx127x_write_single(spi, 0x0D, 0x00); // RX restart off
-    sx127x_write_single(spi, 0x1F, 0x00); // RX preamble off
+    sx127x_write_single(spi, 0x14, 0x28); // RegOokPeak: Bit sync on, OOK peak, OOKPeakThresStep 0.5dB
+    sx127x_write_single(spi, 0x31, 0x00); // RegPacketConfig2: Packet mode off, Continuous on
+    sx127x_write_single(spi, 0x40, 0x40); // RegDioMapping1: DIO0 = RSSI
+    sx127x_write_single(spi, 0x0C, 0x23); // RegLNA:  Max gain + boost of 150%
+    sx127x_write_single(spi, 0x0D, 0x00); // RegRxConfig: RX restart off
+    sx127x_write_single(spi, 0x1F, 0x00); // RegPreambleDetect: Preamble off
 
     // Bring SX127x out of sleep into frequency synthesis receive mode
     sx127x_write_single(spi, 0x01, 0x2C); // Set freq synth receiver mode
@@ -238,6 +228,32 @@ void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2
     printf("Threshold Final: +%ddBi\n", threshold);
 }
 
+/**
+ * @brief Compare values
+ * @param a First value
+ * @param b Second value
+ */
+int compare_uint8(const void *a, const void *b) {
+    return (*(int *)a - *(int *)b);
+}
+
+/**
+ * @brief SX RSSI Threshold Calibrate
+ * @param spi SPI Device Handle
+ */
+void sx127x_rssithresh_calibrate(spi_device_handle_t spi) {
+    uint8_t rssiValues[21];
+
+    for (int x = 0; x < (sizeof(rssiValues) / sizeof(rssiValues[0])); x++) {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        rssiValues[x] = sx127x_read_single(spi, 0x11);
+    }
+    qsort(rssiValues, sizeof(rssiValues) / sizeof(rssiValues[0]), sizeof(rssiValues[0]), compare_uint8);
+
+    // Set Median as threshold
+    printf("[SX127x] RSSI Threshold: %0.1f dB (0x%02x)\n", (float)(rssiValues[10] - 12) / 2, rssiValues[10] - 12);
+    sx127x_write_single(spi, 0x10, rssiValues[10] - 12);
+}
 
 /**
  * @brief RFM RxRestart
@@ -246,6 +262,8 @@ void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2
 void sx127x_rxrestart(spi_device_handle_t spi) {
     uint8_t value = 0x00;
     sx127x_cmd(spi, 0x0D, 0, &value, 1);
+    // Restart without PLL / changes
     value |= 0x40;
     sx127x_cmd(spi, 0x0D, 1, &value, 1);
+    
 }

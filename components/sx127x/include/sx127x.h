@@ -15,3 +15,4 @@ void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uin
 void sx127x_init_fskpacket(spi_device_handle_t spi, gpio_num_t gpio_rst, uint32_t frequency, uint16_t bitrate);
 void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2, uint32_t bitrate);
 void sx127x_rxrestart(spi_device_handle_t spi);
+void sx127x_rssithresh_calibrate(spi_device_handle_t spi);
