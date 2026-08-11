@@ -89,20 +89,20 @@
  */
 
 // RA-02
-#define PIN_NUM_433_CS  18
+#define PIN_NUM_433_CS   18
 #define PIN_NUM_433_RST  17
 #define PIN_NUM_433_DIO0  8
 #define PIN_NUM_433_DIO2  2
 
 // RA-01
-#define PIN_NUM_868_CS  6
-#define PIN_NUM_868_RST  5
-#define PIN_NUM_868_DIO0  10
+#define PIN_NUM_868_CS    6
+#define PIN_NUM_868_RST   5
+#define PIN_NUM_868_DIO0 10
 
 // Ethernet pins
-#define PIN_NUM_ETH_CS      9
-#define PIN_NUM_ETH_RST     7
-#define PIN_NUM_ETH_INT     14
+#define PIN_NUM_ETH_CS    9
+#define PIN_NUM_ETH_RST   7
+#define PIN_NUM_ETH_INT  14
 
 static bool network_present = false;
 
@@ -111,6 +111,9 @@ volatile bool gpio_rssi_433_flag = 0;
 volatile bool ulp_rx_done_433_flag = 0;
 
 volatile bool gpio_rssi_868_flag = 0;
+
+static TaskHandle_t sx1278_433_task_handle = NULL;
+static spi_device_handle_t sx1278_433_spi;
 
 // Start and end addr of ULP program in 32bit chunks: 0 (0x0000) - 255 (0x03FF)
 extern const uint8_t bin_start[] asm("_binary_ulp_data_433_bin_start");
@@ -167,30 +170,98 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
  * @brief Interrupt for when RSSI goes high on DIO2
  * @param arg Unused
  */
-static void IRAM_ATTR dio0_rssi_433_isr(void *arg) {
+static void IRAM_ATTR sx1278_433_ulp_isr(void *arg) {
     esp_err_t err;
     gpio_rssi_433_flag = 1;
     err = ulp_run(&ulp_entry - RTC_SLOW_MEM);
     ESP_ERROR_CHECK(err);
 }
 
+void sx1278_433_task(void *pvParameters) {
+    spi_device_handle_t spi = (spi_device_handle_t)pvParameters;
+
+    for (;;) {
+        // Wait for ISR call
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // RXDone
+        if (ulp_state == 1) {
+            esp_err_t err;
+            // Print the RFM ULP variables
+            printf("[SX127x] 433MHz Raw Data: %lld - 0x%04x,0x%04x\n", 
+                esp_timer_get_time() / 1000000,
+                (uint16_t)(&ulp_value)[0], (uint16_t)(&ulp_value)[1]);
+
+            int64_t sensor_id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
+            uint8_t battery = ((uint16_t)(&ulp_value)[0] >> 7) & 0x1; 
+            uint8_t manual = ((uint16_t)(&ulp_value)[0] >> 6) & 0x1;
+            uint8_t channel = (((uint16_t)(&ulp_value)[0]>> 4) & 0x3) + 1;
+            double temp = (float)((((((uint16_t)(&ulp_value)[0] & 0x7) << 8) | (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF))
+                            ^ (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) + (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) * 0.1;
+            int64_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
+            printf("[SX127x] 433MHz Parsed Data: Id: 0x%02llx, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %lld%%\n", 
+                sensor_id, battery, manual, channel, temp, humidity);
+
+            char *pb_data = (char *)malloc(sizeof(char) * 1024);
+            size_t pb_len = otlp_climate(pb_data, sensor_id, temp, humidity);
+            otlp_nanopb_print(pb_data, pb_len);
+
+            if (network_present) { 
+                /* 
+                * If SSL verification isn't needed for testing:
+                * - CONFIG_ESP_TLS_INSECURE=y
+                * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+                * 
+                * Otherwise add:
+                * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+                * - #include "esp_crt_bundle.h"
+                * - esp_http_client_config_t http_client_config = {
+                *     .crt_bundle_attach = esp_crt_bundle_attach,
+                *   }
+                */
+                esp_http_client_config_t http_client_config = {
+                    .url = OTLP_METRICS_ENDPOINT,
+                    .timeout_ms = 1000,
+                    .crt_bundle_attach = esp_crt_bundle_attach,
+                };
+
+                printf("[HTTP]: Init\n");
+                esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
+                esp_http_client_set_method(client, HTTP_METHOD_POST);
+                esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
+                esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
+                esp_http_client_set_post_field(client, pb_data, pb_len);
+                printf("[HTTP]: Perform\n");
+                err = esp_http_client_perform(client);
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
+                } else {
+                    ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
+                }
+                printf("[HTTP]: Clean-up\n");
+                esp_http_client_cleanup(client);
+            }
+
+            free(pb_data);
+        }
+        ulp_state = 0; // Set back to running
+        sx127x_write_single(spi, 0x3E, 0x08); // Reset RSSI
+        sx127x_rxrestart(spi);
+    }
+}
+
 /**
  * @brief Interrupt for when the GPIO_RX_DONE goes low, indicating RX complete
  * @param arg SPI Device Handle
  */
-static void IRAM_ATTR rx_done_433_isr(void *arg) {
-    spi_device_handle_t spi = (spi_device_handle_t)arg;
+static void IRAM_ATTR sx1278_433_task_isr(void *arg) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    /* 
-     * state = 0; RUNNING
-     * state = 1; RXOK
-     * state = 2; FAIL
-     */
-    if (ulp_state == 1) {
-        ulp_rx_done_433_flag = 1;
+    vTaskNotifyGiveFromISR(sx1278_433_task_handle, &xHigherPriorityTaskWoken);
+
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
     }
-    ulp_state = 0; // Set back to running
-    sx127x_rxrestart(spi);
 }  
 
 /**
@@ -406,7 +477,7 @@ void app_main(void)
     esp_err_t err;
 
     // Pause to avoid development-induced crash-loop
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    // vTaskDelay(10000 / portTICK_PERIOD_MS);
 
     // CoreS3 - Initialise I2C bus
     setup_i2c_bus();
@@ -435,7 +506,23 @@ void app_main(void)
     err = i2c_master_transmit(axp2101_handle, &ldos_keypair[0], 2, -1);
     ESP_ERROR_CHECK(err);
 
-    // CoreS3 - LCD Power On - PMU Port 1, LCD RST = HIGH
+    /* 
+     * USB_OTG_EN | BUS_OUT_EN | Power Direction
+     * -----------|------------|-----------------------------------------------------
+     * 0x00       | 0x00       | USB 5V input,  BUS 5V input  (separate power)
+     * 0x00       | 0x02       | USB 5V input,  BUS 5V output (to power a PoE base)§
+     * 0x20       | 0x00       | USB 5V output, BUS 5V input  (to power a USB device)
+     * 0x20       | 0x02       | USB 5V output, BUS 5V output (invalid?) 
+     * 
+     * §: To draw power from USB for a unpowered PoE, BOOST_EN needs to be enabled
+     */
+
+    /// CoreS3 - AW9523B GPIO: Port 0 = USB_OTG_EN (0x20) + BUS_OUT_EN (0x02)
+    uint8_t bus_power_on[2] = { 0x02, 0x00 };
+    err = i2c_master_transmit(aw9523b_handle, &bus_power_on[0], 2, -1);
+    ESP_ERROR_CHECK(err);
+
+    /// CoreS3 - AW9523B GPIO: Port 1 = BOOST_EN (0x80) | LCD_RST (0x02)
     uint8_t lcd_power_on[2] = { 0x03, 0x02 };
     err = i2c_master_transmit(aw9523b_handle, &lcd_power_on[0], 2, -1);
     ESP_ERROR_CHECK(err);
@@ -455,6 +542,13 @@ void app_main(void)
     // Initialise SPI bus
     setup_spi_bus(SPI_HOST_ID);
 
+    // LCD setup
+    lv_display_t *lvgl_disp = NULL;
+    lvgl_display_init(lvgl_disp, SPI_HOST_ID, PIN_NUM_LCD_DC, PIN_NUM_LCD_CS);
+    lvgl_port_lock(0);
+    ui_main();
+    lvgl_port_unlock();
+
     // W5500 setup - return a handle for debugging?
     esp_eth_handle_t *w5500poe_handle = setup_w5500poe(SPI_HOST_ID);
     assert(w5500poe_handle);
@@ -462,7 +556,6 @@ void app_main(void)
     /*
      * SX1278
      */
-    spi_device_handle_t sx1278_433_spi;
     spi_device_interface_config_t sx1278_433_cfg = {
         .command_bits = 8,
         .clock_speed_hz = SPI_MASTER_FREQ_10M,
@@ -480,11 +573,14 @@ void app_main(void)
     gpio_pulldown_dis(PIN_NUM_433_DIO0);
     gpio_pullup_dis(PIN_NUM_433_DIO0);
 
-    sx127x_init_ookcontinuous(sx1278_433_spi, PIN_NUM_433_RST, 433910000, 2000);
-
+    sx127x_init_ookcontinuous(sx1278_433_spi, PIN_NUM_433_RST, 433915000, 2000);
+    
     // SX1278 433MHz DATA GPIO - Read by ULP, but calibrate first
     gpio_set_direction(PIN_NUM_433_DIO2, GPIO_MODE_INPUT);
-    sx127x_ookfixthresh_calibrate(sx1278_433_spi, PIN_NUM_433_DIO2, 2000);
+    sx127x_write_single(sx1278_433_spi, 0x15, 1);
+    sx127x_rssithresh_calibrate(sx1278_433_spi);
+    // Reset RSSI before we attach interrupt
+    sx127x_write_single(sx1278_433_spi, 0x3E, 0x08); // Reset RSSI
 
     // SX1278 433MHz RSSI GPIO - ISR for ULP RX Complete
     gpio_set_direction(GPIO_RX_DONE, GPIO_MODE_INPUT);
@@ -493,12 +589,15 @@ void app_main(void)
 
     init_rtc_and_ulp();
 
+    // Start 433 post-processor task
+    xTaskCreate(sx1278_433_task, "433MHz Task", 4096, (void *)sx1278_433_spi, 10, &sx1278_433_task_handle);
+
     // Attach the interrupt service routine, dio0_rssi_isr(), to DIO0
-    err = gpio_isr_handler_add(PIN_NUM_433_DIO0, dio0_rssi_433_isr, NULL);
+    err = gpio_isr_handler_add(PIN_NUM_433_DIO0, sx1278_433_ulp_isr, NULL);
     ESP_ERROR_CHECK(err);
 
     // Attach the interrupt service routine, rx_done_isr(), to GPIO_RX_DONE
-    err = gpio_isr_handler_add(GPIO_RX_DONE, rx_done_433_isr, (void*)sx1278_433_spi);
+    err = gpio_isr_handler_add(GPIO_RX_DONE, sx1278_433_task_isr, (void*)sx1278_433_spi);
     ESP_ERROR_CHECK(err);
 
     /*
@@ -528,13 +627,6 @@ void app_main(void)
     err = gpio_isr_handler_add(PIN_NUM_868_DIO0, dio0_rssi_868_isr, NULL);
     ESP_ERROR_CHECK(err);
 
-    // LCD setup
-    lv_display_t *lvgl_disp = NULL;
-    lvgl_display_init(lvgl_disp, SPI_HOST_ID, PIN_NUM_LCD_DC, PIN_NUM_LCD_CS);
-    lvgl_port_lock(0);
-    ui_main();
-    lvgl_port_unlock();
-
     // SNTP
     esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     esp_netif_sntp_init(&sntp_config);
@@ -544,78 +636,17 @@ void app_main(void)
         vTaskDelay(5000 / portTICK_PERIOD_MS);
 
         if (gpio_rssi_868_flag) {
-            printf("[SX127x] 868MHz RSSI Detected\n");
             gpio_rssi_868_flag = 0;
+            printf("[SX127x] 868MHz RSSI Detected\n");
             uint8_t value = sx127x_read_single(sx1276_868_spi, 0x00);
             printf("[SX127x] 868MHz Packet Size: %d bytes\n", value);
             printf("[SX127x] 868MHz Packet Data:");
+            uint8_t y = 0;
             for (int x = 0; x < value; x++) {
-                printf(" %02x", sx127x_read_single(sx1276_868_spi, 0x00));
+                y = sx127x_read_single(sx1276_868_spi, 0x00);
+                printf(" %02x", y);
             }
             printf("\n");
-        }
-        
-        if (gpio_rssi_433_flag) {
-            printf("[SX127x] 433MHz RSSI Detected\n");
-            gpio_rssi_433_flag = 0;
-        }
-
-        if (ulp_rx_done_433_flag) {
-            ulp_rx_done_433_flag = 0;
-
-            // Print the RFM ULP variables
-            printf("[SX127x] 433MHz Raw Data: %lld - 0x%04x,0x%04x\n", 
-                esp_timer_get_time() / 1000000,
-                (uint16_t)(&ulp_value)[0], (uint16_t)(&ulp_value)[1]);
-
-            int64_t sensor_id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
-            uint8_t battery = ((uint16_t)(&ulp_value)[0] >> 7) & 0x1; 
-            uint8_t manual = ((uint16_t)(&ulp_value)[0] >> 6) & 0x1;
-            uint8_t channel = (((uint16_t)(&ulp_value)[0]>> 4) & 0x3) + 1;
-            double temp = (float)((((((uint16_t)(&ulp_value)[0] & 0x7) << 8) | (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF))
-                            ^ (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) + (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) * 0.1;
-            int64_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
-            printf("[SX127x] 433MHz Parsed Data: Id: 0x%02llx, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %lld%%\n", 
-                sensor_id, battery, manual, channel, temp, humidity);
-
-            char *pb_data = (char *)malloc(sizeof(char) * 1024);
-            size_t pb_len = otlp_climate(pb_data, sensor_id, temp, humidity);
-            otlp_nanopb_print(pb_data, pb_len);
-
-            if (network_present) { 
-                /* 
-                * If SSL verification isn't needed for testing:
-                * - CONFIG_ESP_TLS_INSECURE=y
-                * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
-                * 
-                * Otherwise add:
-                * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-                * - #include "esp_crt_bundle.h"
-                * - esp_http_client_config_t http_client_config = {
-                *     .crt_bundle_attach = esp_crt_bundle_attach,
-                *   }
-                */
-                esp_http_client_config_t http_client_config = {
-                    .url = OTLP_METRICS_ENDPOINT,
-                    .timeout_ms = 5000,
-                    .crt_bundle_attach = esp_crt_bundle_attach,
-                };
-
-                esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
-                esp_http_client_set_method(client, HTTP_METHOD_POST);
-                esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
-                esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
-                esp_http_client_set_post_field(client, pb_data, pb_len);
-                err = esp_http_client_perform(client);
-                if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
-                } else {
-                    ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
-                }
-                esp_http_client_cleanup(client);
-            }
-
-            free(pb_data);
         }
     }
 }
