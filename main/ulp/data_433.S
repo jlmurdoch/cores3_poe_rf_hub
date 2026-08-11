@@ -42,157 +42,179 @@
 
     .bss
 
-    .global state
+    .global state       // 0 = ONGOING, 1 = RXOK, 2 = FAIL
 state:
-    .long 0             // 0 = no, in progress, 1 = RXOK, 2 = FAIL
-    // 2 x 16-bit values
-    .global value
+    .long 0             
+    
+    .global value       // 2 x 16-bit values
 value:  
-    .long 0             // ulp_value[0]
-    .long 0             // ulp_value[1]
-    .global bits
-bits:
-    .long 0
+    .long 0x0           // ulp_value[0]
+    .long 0x0           // ulp_value[1]
 
-last_val:               // Used for double-checking
-    .long 0
-    .long 0
+value_cache:            // Used for double-checking
+    .long 0x0
+    .long 0x0
 
     .text
 
+/*
+ * Entry point and reset
+ */
     .global entry
-entry:                                    // Reset everything
-    move r3, 0          // Reset bit count
-    move r0, bits
-    st r3, r0, 0 
+entry:                      // Reset everything
+    stage_rst               // Reset timer counter
+    move r3, 0              // Reset bit count
 
-    move r1, 0x0        // Reset all vars
-    move r0, value      // r0 <- var address
-    st r1, r0, 0        // r1 -> r0 data save
-    move r0, value      // r0 <- var address
-    st r1, r0, 4        // r1 -> r0 data save
+    move r1, 0xFFFF         // Reset value[0] and value[1]
+    move r0, value          // r0 <- var address
+    st r1, r0, 0            // r1 -> r0 data save
+    move r0, value          // r0 <- var address
+    st r1, r0, 4            // r1 -> r0 data save
 
-    stage_rst
-
-read:                   // (42 cycles)
-                        // (8) Read GPIO low bank
+/*
+ * Read GPIO and edge detection. Time sensitive.
+ */
+read:                       // (42 cycles)
+                            // (8) Read GPIO low bank
     READ_RTC_REG(RTC_GPIO_IN_REG, RTC_GPIO_IN_NEXT_S, 16)
-    rsh r0, r0, DIO2    // (6) Shift to GPIO
-    and r0, r0, 1       // (6) Is GPIO HIGH?
-    add r1, r0, r2      // (6) Edge (r1 == 1) or same (r1 == 0 || 2)
-    move r2, r0         // (6) Save level to r2
-    and r1, r1, 1       // (6) Is it an edge (1)?     
-    jump loop, eq       // (4) If not an edge, loop
+    rsh r0, r0, DIO2        // (6) Shift to GPIO
+    and r0, r0, 1           // (6) Is GPIO HIGH?
+    add r1, r0, r2          // (6) Edge (r1 == 1) or same (r1 == 0 || 2)
+    move r2, r0             // (6) Save level to r2
+    and r1, r1, 1           // (6) Is it an edge (1)?     
+    jump loop, eq           // (4) If not an edge, loop
 
-edge:                   // Level change
-    jumps lead, 30,  LE // Lead pulse (<0.6ms)
-    jumps data, 120, LE // Data pulse (<2.4ms)
-    jump entry
-    
-lead:                   // Lead pulse - soft reset
-    stage_rst           // Reset timer
-    move r0, r3         // Get bit count
-    jumpr rxok, 36, EQ  // Quit if 36 bits
-    jump loop           // Continue
+/*
+ * Edge processing: Use stage counter to determine time elapsed 
+ */
+edge:                       // Level change
+    jumps lead, 30,  LE     // Lead pulse (<0.6ms)
+    jumps data, 120, LE     // Data pulse (<2.4ms)
+    move r0, r3             // Get the number of bits
+    jumpr rxok, 36, EQ      // If long and 36 bits processed, go to RX OK
+    jump entry              // Restart if anything else
 
-loop:                   // (20 cycles)
-    wait 300            // (6) changed from 288 to 300 for SX127x (sensitivity?)
-    stage_inc 1         // (6) Timer increment
-    jumps timeout, 254, GE // (4) break()
-    jump read           // (4) Read again
+/*
+ * Data pulse procedure: Determine if zero and one (or ignore)
+ */
+data:                       // Valid bit
+    and r0, r2, 1           // Quit if level is 1 - data should be 0
+    jump entry, EQ          // Quit
+    add r3, r3, 1           // Increment bit count
+    move r0, r3             // Eval bit count
+    jumpr msb, 16, LE       // MSB short [1-16]
+    jumpr lsb, 24, LE       // LSB short [17-24]
+    jumpr lsb, 29, GE       // LSB short [29-36]
 
-data:                   // Valid bit
-    and r0, r2, 1       // Quit if level is 1 - data should be 0
-    jump entry, EQ      // Quit
-    add r3, r3, 1       // Increment bit count
-    move r0, r3         // Eval bit count
-    jumpr msb, 16, LE   // MSB short [1-16]
-    jumpr lsb, 24, LE   // LSB short [17-24]
-    jumpr lsb, 29, GE   // LSB short [29-36]
+    jumps entry, 60, LT     // Reset if data not one [25-28]
+    jump lead               // Ignore like a lead pulse for bits [25-28]
 
-    jumps entry, 60, LT // Reset if data not one [25-28]
-    stage_rst           // Ignore the 0xF = 36 to 32 bits!
-    jumpr loop, 28, LE  // Skip bits if all one [25-28]
-
-msb:                    // MSB short [0-15]
-    move r1, value      // r1 <- var address
-    ld r0, r1, 0        // r0 <- r1[0] data load
-    lsh r1, r0, 1       // r1 = r0 << 1
-    jumps msb0, 60, LT  // Add zero?
+/*
+ * Add bit to value[0] (MSB)
+ */
+msb:                        // MSB short [0-15]
+    move r1, value          // r1 <- var address
+    ld r0, r1, 0            // r0 <- r1[0] data load
+    lsh r1, r0, 1           // r1 = r0 << 1
+    jumps msb0, 60, LT      // Add zero?
 msb1:
-    add r1, r1, 1       // Add one: r1++
+    add r1, r1, 1           // Add one: r1++
 msb0:
-    move r0, value      // r0 <- var address
-    st r1, r0, 0        // r1 -> r0[0] data save
-    stage_rst           // Reset timer
-    jump loop           // Continue
+    move r0, value          // r0 <- var address
+    st r1, r0, 0            // r1 -> r0[0] data save
+    stage_rst               // Reset timer counter
+    jump loop               // Continue
 
-lsb:                    // LSB short [17-24, 29-36]
-    move r1, value      // r1 <- var address
-    ld r0, r1, 4        // r0 <- r1[1] data load
-    lsh r1, r0, 1       // r1 = r0 << 1
-    jumps lsb0, 60, LT  // Add zero?
+/*
+ * Add bit to value[0] (LSB)
+ */
+lsb:                        // LSB short [17-24, 29-36]
+    move r1, value          // r1 <- var address
+    ld r0, r1, 4            // r0 <- r1[1] data load
+    lsh r1, r0, 1           // r1 = r0 << 1
+    jumps lsb0, 60, LT      // Add zero?
 lsb1:
-    add r1, r1, 1       // Add one: r1++
+    add r1, r1, 1           // Add one: r1++
 lsb0:
-    move r0, value      // r0 <- var address
-    st r1, r0, 4        // r1 -> r0[1] data save
-    stage_rst           // Reset timer
-    jump loop           // Continue
+    move r0, value          // r0 <- var address
+    st r1, r0, 4            // r1 -> r0[1] data save
 
+/*
+ * Lead pulse procedure: Do nothing other than reset the timer
+ */ 
+lead:                       // Lead pulse - soft reset
+    stage_rst               // Reset timer counter, fall through
+
+/*
+ * Looping procedure: Spins the ULP for a number of cycles. Also detects timeouts. Time sensitive.
+ */ 
+loop:                       // (20 cycles)
+    wait 300                // (6) changed from 288 to 300 for SX127x (sensitivity?)
+    stage_inc 1             // (6) Timer increment
+    jumps timeout, 254, GE  // (4) break() if time is too long for a reasonable pulse
+    jump read               // (4) Read again
+
+/*
+ * Cache procedure: Move both values into value_cache
+ */ 
 cache:
-    move r0, value
+    move r0, value          // store value[0] to value_cache[0]
     ld r1, r0, 0
-    move r0, last_val
-    st r1, r0, 0        // store value[0] to last_val[0]
+    move r0, value_cache
+    st r1, r0, 0        
 
-    move r0, value
+    move r0, value          // store value[1] to value_cache[1]
     ld r1, r0, 4
-    move r0, last_val   // store value[1] to last_val[1]
+    move r0, value_cache   
     st r1, r0, 4
     
-    jump read
+    jump entry              // Continue, looking for new set of values
 
+/*
+ * Timeout procedure: flag failure and do a hard exit (no waiting)
+ */
 timeout:
-    move r1, 2          // Set state to TIMEOUT
-    move r0, state      // r0 <- var address
-    st r1, r0, 0        // r1 -> r0 data save 
-    jump exit
+    move r1, 2              // Set state to TIMEOUT
+    move r0, state          // r0 <- var address
+    st r1, r0, 0            // r1 -> r0 data save 
+    jump exit               // Premature exit
 
+/*
+ * RX OK procedure: check if last two valid values match
+ */
 rxok:
-    move r0, bits
-    st r3, r0, 0 
-
-    stage_rst           // Reset timer regardless
-    move r3, 0          // Reset bit count
-
-    move r0, value
+    move r0, value          // Match value[0] with cached value[0]
     ld r1, r0, 0
-    move r0, last_val
+    move r0, value_cache
     ld r2, r0, 0
-    // sub r0, r1, r2      // Compare value[0] with last value[0]
-    // jumpr cache, 1, ge  // No match, cache it
-    and r0, r1, r2
-    jump cache, EQ
+    and r0, r1, r2      
+    jump cache, EQ          // No match, cache value[0] and value[1]
 
-    move r0, value
+    move r0, value          // Match value[1] with cached value[1]
     ld r1, r0, 4
-    move r0, last_val
+    move r0, value_cache
     ld r2, r0, 4
-    // sub r0, r1, r2      // Compare value[1] with last value[1]
-    // jumpr cache, 1, ge  // No match, cache it
-    and r0, r1, r2
+    and r0, r1, r2          // No match, cache value[0] and value[1]
     jump cache, EQ
 
-coda:                   // loop of 3.7ms exactly
-    wait 64734          // (6) 16 + 64734 = 64750 = 3.7.ms
-    stage_inc 1         // (6) Increment counter
-    jumps coda, 200, LE // (4) 175 x 3.7ms = 647.5ms = 92.5ms x 7 repeats
-    move r1, 1          // Set state to RXOK
-    move r0, state      // r0 <- var address
-    st r1, r0, 0        // r1 -> r0 data save 
+    stage_rst               // Reset timer counter, fall through
 
-exit:                   // Notify main code of state
+/*
+ * Wait out the remaining transmission.
+ */
+coda:                       // loop of 3.7ms exactly
+    wait 64734              // (6) 16 + 64734 = 64750 = 3.7.ms
+    stage_inc 1             // (6) Increment counter
+    jumps coda, 250, LE     // (4) 200 x 3.7ms = 740ms stop recurring false-positives caused by tail
+
+    move r1, 1              // Set state to RXOK
+    move r0, state          // r0 <- var address
+    st r1, r0, 0            // r1 -> r0 data save
+
+/*
+ * Clean shutdown, flagging RX complete (good or not)
+ */
+exit:                       // Notify main code of state
     // "Set to 1, then that pin i/o is routed to the RTC subsystem" 
     WRITE_RTC_REG(RTC_IO_TOUCH_PAD1_REG, RTC_IO_TOUCH_PAD1_MUX_SEL_S, 1, 1)
 
@@ -206,4 +228,4 @@ exit:                   // Notify main code of state
     WRITE_RTC_FIELD(RTC_CNTL_ULP_CP_TIMER_REG, RTC_CNTL_ULP_CP_SLP_TIMER_EN, 0)
     // signal low to indicate a RX has been done
     WRITE_RTC_REG(RTC_GPIO_OUT_W1TC_REG, RTC_GPIO_OUT_DATA_W1TC_S + GPIO_RX_DONE, 1, 1)
-    halt                // Stop
+    halt                    // Stop
