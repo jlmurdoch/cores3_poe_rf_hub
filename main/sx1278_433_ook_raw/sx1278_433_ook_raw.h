@@ -29,12 +29,11 @@
 
 extern volatile bool network_present;
 static TaskHandle_t sx1278_433_task_handle = NULL;
+
 // Start and end addr of ULP program in 32bit chunks: 0 (0x0000) - 255 (0x03FF)
 extern const uint8_t bin_start[] asm("_binary_ulp_data_433_bin_start");
 extern const uint8_t bin_end[]   asm("_binary_ulp_data_433_bin_end");
 
-void init_rtc_and_ulp(void);
-
-void init_433_isr_and_task(spi_device_handle_t sx1278_433_spi);
+void init_sx1278_433_ook_raw(void) ;
 
 #endif

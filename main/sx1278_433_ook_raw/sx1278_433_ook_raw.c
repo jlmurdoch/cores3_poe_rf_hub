@@ -95,22 +95,7 @@ static void IRAM_ATTR sx1278_433_task_isr(void *arg) {
     if (xHigherPriorityTaskWoken) {
         portYIELD_FROM_ISR();
     }
-}  
-
-void init_433_isr_and_task(spi_device_handle_t sx1278_433_spi){
-    esp_err_t err;
-
-    // Start 433 post-processor task
-    xTaskCreate(sx1278_433_task, "433MHz Task", 4096, (void *)sx1278_433_spi, 10, &sx1278_433_task_handle);
-
-    // Attach the interrupt service routine, dio0_rssi_isr(), to DIO0
-    err = gpio_isr_handler_add(PIN_NUM_433_DIO0, sx1278_433_ulp_isr, NULL);
-    ESP_ERROR_CHECK(err);
-
-    // Attach the interrupt service routine, rx_done_isr(), to GPIO_RX_DONE
-    err = gpio_isr_handler_add(GPIO_RX_DONE, sx1278_433_task_isr, (void*)sx1278_433_spi);
-    ESP_ERROR_CHECK(err);
-}
+} 
 
 /**
  * @brief Initialise RTC and ULP
@@ -158,5 +143,55 @@ void init_rtc_and_ulp(void)
      * ULP Program Upload
      */
     err = ulp_load_binary(0, bin_start, (bin_end - bin_start) / sizeof(uint32_t));
+    ESP_ERROR_CHECK(err);
+}
+
+void init_sx1278_433_ook_raw(void) { 
+    esp_err_t err;
+
+    static spi_device_handle_t sx1278_433_spi;
+    spi_device_interface_config_t sx1278_433_cfg = {
+        .command_bits = 8,
+        .clock_speed_hz = SPI_MASTER_FREQ_10M,
+        .mode = 0,
+        .spics_io_num = PIN_NUM_433_CS,
+        .queue_size = 1,
+    };
+    err = spi_bus_add_device(SPI_HOST_ID, &sx1278_433_cfg, &sx1278_433_spi);
+
+    gpio_set_direction(PIN_NUM_433_RST, GPIO_MODE_OUTPUT);
+
+    // SX1278 433MHz RSSI GPIO - ISR for signal detection
+    gpio_set_direction(PIN_NUM_433_DIO0, GPIO_MODE_INPUT);
+    gpio_set_intr_type(PIN_NUM_433_DIO0, GPIO_INTR_POSEDGE);
+    gpio_pulldown_dis(PIN_NUM_433_DIO0);
+    gpio_pullup_dis(PIN_NUM_433_DIO0);
+
+    sx127x_init_ookcontinuous(sx1278_433_spi, PIN_NUM_433_RST, 433915000, 2000);
+    
+    // SX1278 433MHz DATA GPIO - Read by ULP, but calibrate first
+    gpio_set_direction(PIN_NUM_433_DIO2, GPIO_MODE_INPUT);
+    sx127x_write_single(sx1278_433_spi, 0x15, 1);
+    sx127x_rssithresh_calibrate(sx1278_433_spi);
+    // Reset RSSI before we attach interrupt
+    sx127x_write_single(sx1278_433_spi, 0x3E, 0x08); // Reset RSSI
+
+    // SX1278 433MHz RSSI GPIO - ISR for ULP RX Complete
+    gpio_set_direction(GPIO_RX_DONE, GPIO_MODE_INPUT);
+    gpio_set_intr_type(GPIO_RX_DONE, GPIO_INTR_NEGEDGE);
+    gpio_pulldown_en(GPIO_RX_DONE);
+
+    // Ready the ULP, but do not run yet
+    init_rtc_and_ulp();
+
+    // Start 433 post-processor task
+    xTaskCreate(sx1278_433_task, "433MHz Task", 4096, (void *)sx1278_433_spi, 10, &sx1278_433_task_handle);
+
+    // Attach the interrupt service routine, dio0_rssi_isr(), to DIO0
+    err = gpio_isr_handler_add(PIN_NUM_433_DIO0, sx1278_433_ulp_isr, NULL);
+    ESP_ERROR_CHECK(err);
+
+    // Attach the interrupt service routine, rx_done_isr(), to GPIO_RX_DONE
+    err = gpio_isr_handler_add(GPIO_RX_DONE, sx1278_433_task_isr, (void*)sx1278_433_spi);
     ESP_ERROR_CHECK(err);
 }

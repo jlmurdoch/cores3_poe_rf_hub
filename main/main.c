@@ -5,9 +5,6 @@
 #include "esp_log.h"
 #include "esp_event.h"
 
-// Timestamping
-#include "esp_timer.h"
-
 // GPIO
 #include "driver/gpio.h"
 #include "soc/gpio_struct.h"
@@ -31,24 +28,17 @@
 // SNTP
 #include "esp_netif_sntp.h"
 
-#include "sx127x.h"
-
+// Radio sensors
 #include "sx1278_433_ook_raw/sx1278_433_ook_raw.h"
+#include "sx1276_868_fsk_pkt/sx1276_868_fsk_pkt.h"
 
+// UI
 #include "lvgl_ui/lvgl_ui.h"
-#include "otlp_climate/otlp_climate.h"
 
+// Hardware defines
 #include "config.h"
 
 volatile bool network_present = false;
-
-// Flag to indicate ULP has finished processing
-volatile bool ulp_rx_done_433_flag = 0;
-
-volatile bool gpio_rssi_868_flag = 0;
-
-static spi_device_handle_t sx1278_433_spi;
-
 static esp_event_handler_instance_t eth_ev_instance = NULL;
 
 // Event handler for Ethernet events
@@ -94,15 +84,6 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "~~~~~~~~~~~");
 
     network_present = true;
-}
-
-/**
- * @brief Interrupt for when RSSI goes high on DIO2
- * @param arg Unused
- */
-static void IRAM_ATTR dio0_rssi_868_isr(void *arg) {
-    gpio_rssi_868_flag = 1;
-    // TODO: Push task
 }
 
 esp_eth_handle_t *setup_w5500poe(esp_lcd_spi_bus_handle_t spi_host_id) {
@@ -262,31 +243,20 @@ void app_main(void)
     // Pause to avoid development-induced crash-loop
     // vTaskDelay(10000 / portTICK_PERIOD_MS);
 
-    // CoreS3 - Initialise I2C bus
+    /*
+     * I2C Bus
+     */ 
     setup_i2c_bus();
 
-    // CoreS3 - Prep the PMU and GPIO expander
-    i2c_master_dev_handle_t axp2101_handle = setup_i2c_dev(I2C_PORT, I2C_ADDR_AXP2101);
+    /*
+     * AW9523B - GPIO Expander
+     */ 
+    // CoreS3 - Prep the GPIO expander
     i2c_master_dev_handle_t aw9523b_handle = setup_i2c_dev(I2C_PORT, I2C_ADDR_AW9523B);
 
     // CoreS3 - Push/Pull on
     uint8_t aw_push_pull_on[2] = { 0x11, 0x10 };
     err = i2c_master_transmit(aw9523b_handle, &aw_push_pull_on[0], 2, -1);
-    ESP_ERROR_CHECK(err);
-
-    // CoreS3 - LCD Backlight Voltage - AXP2101: dldo1 voltage (0x99) = 100% brightness (0x17)
-    uint8_t lcd_lite_voltage[2] = { 0x99, 0x17 };
-    err = i2c_master_transmit(axp2101_handle, &lcd_lite_voltage[0], 2, -1);
-    ESP_ERROR_CHECK(err);
-
-    // CoreS3 - Read AXP2101 reg 0x90: LDOS ON/OFF
-    uint8_t ldos_keypair[2] = { 0x90, 0x00 };
-    err = i2c_master_transmit_receive(axp2101_handle, &ldos_keypair[0], 1, &ldos_keypair[1], 1, -1);
-    ESP_ERROR_CHECK(err);
-
-    // CoreS3 - Write AXP2101 reg 0x90: LCD Backlight on (bit7: dldo1)
-    ldos_keypair[1] |= 0x80;
-    err = i2c_master_transmit(axp2101_handle, &ldos_keypair[0], 2, -1);
     ESP_ERROR_CHECK(err);
 
     /* 
@@ -310,6 +280,30 @@ void app_main(void)
     err = i2c_master_transmit(aw9523b_handle, &lcd_power_on[0], 2, -1);
     ESP_ERROR_CHECK(err);
 
+    /*
+     * AXP2101 - Power Management Unit
+     */ 
+    // CoreS3 - Prep the PMU
+    i2c_master_dev_handle_t axp2101_handle = setup_i2c_dev(I2C_PORT, I2C_ADDR_AXP2101);
+
+    // CoreS3 - LCD Backlight Voltage - AXP2101: dldo1 voltage (0x99) = 100% brightness (0x17)
+    uint8_t lcd_lite_voltage[2] = { 0x99, 0x17 };
+    err = i2c_master_transmit(axp2101_handle, &lcd_lite_voltage[0], 2, -1);
+    ESP_ERROR_CHECK(err);
+
+    // CoreS3 - Read AXP2101 reg 0x90: LDOS ON/OFF
+    uint8_t ldos_keypair[2] = { 0x90, 0x00 };
+    err = i2c_master_transmit_receive(axp2101_handle, &ldos_keypair[0], 1, &ldos_keypair[1], 1, -1);
+    ESP_ERROR_CHECK(err);
+
+    // CoreS3 - Write AXP2101 reg 0x90: LCD Backlight on (bit7: dldo1)
+    ldos_keypair[1] |= 0x80;
+    err = i2c_master_transmit(axp2101_handle, &ldos_keypair[0], 2, -1);
+    ESP_ERROR_CHECK(err);
+
+    /*
+     * Ready SPI Devices 
+     */ 
     // Pull SPI CS HIGH for all attached SPI devices
     gpio_set_direction(PIN_NUM_ETH_CS, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_NUM_SXC_CS, GPIO_MODE_OUTPUT);
@@ -322,104 +316,38 @@ void app_main(void)
     gpio_set_level(PIN_NUM_868_CS, 1);
     gpio_set_level(PIN_NUM_433_CS, 1);
 
-    // Initialise SPI bus
+    /*
+     * SPI Bus
+     */ 
     setup_spi_bus(SPI_HOST_ID);
 
-    // LCD setup
+    /*
+     * W5500 PoE Ethernet
+     */ 
+    esp_eth_handle_t *w5500poe_handle = setup_w5500poe(SPI_HOST_ID);
+    assert(w5500poe_handle);
+    
+    // SNTP
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&sntp_config);
+
+    /*
+     * LCD Display
+     */ 
     lv_display_t *lvgl_disp = NULL;
     lvgl_display_init(lvgl_disp, SPI_HOST_ID, PIN_NUM_LCD_DC, PIN_NUM_LCD_CS);
     lvgl_port_lock(0);
     ui_main();
     lvgl_port_unlock();
 
-    // W5500 setup - return a handle for debugging?
-    esp_eth_handle_t *w5500poe_handle = setup_w5500poe(SPI_HOST_ID);
-    assert(w5500poe_handle);
-
     /*
-     * SX1278
-     */
-    spi_device_interface_config_t sx1278_433_cfg = {
-        .command_bits = 8,
-        .clock_speed_hz = SPI_MASTER_FREQ_10M,
-        .mode = 0,
-        .spics_io_num = PIN_NUM_433_CS,
-        .queue_size = 1,
-    };
-    err = spi_bus_add_device(SPI_HOST_ID, &sx1278_433_cfg, &sx1278_433_spi);
-
-    gpio_set_direction(PIN_NUM_433_RST, GPIO_MODE_OUTPUT);
-
-    // SX1278 433MHz RSSI GPIO - ISR for signal detection
-    gpio_set_direction(PIN_NUM_433_DIO0, GPIO_MODE_INPUT);
-    gpio_set_intr_type(PIN_NUM_433_DIO0, GPIO_INTR_POSEDGE);
-    gpio_pulldown_dis(PIN_NUM_433_DIO0);
-    gpio_pullup_dis(PIN_NUM_433_DIO0);
-
-    sx127x_init_ookcontinuous(sx1278_433_spi, PIN_NUM_433_RST, 433915000, 2000);
-    
-    // SX1278 433MHz DATA GPIO - Read by ULP, but calibrate first
-    gpio_set_direction(PIN_NUM_433_DIO2, GPIO_MODE_INPUT);
-    sx127x_write_single(sx1278_433_spi, 0x15, 1);
-    sx127x_rssithresh_calibrate(sx1278_433_spi);
-    // Reset RSSI before we attach interrupt
-    sx127x_write_single(sx1278_433_spi, 0x3E, 0x08); // Reset RSSI
-
-    // SX1278 433MHz RSSI GPIO - ISR for ULP RX Complete
-    gpio_set_direction(GPIO_RX_DONE, GPIO_MODE_INPUT);
-    gpio_set_intr_type(GPIO_RX_DONE, GPIO_INTR_NEGEDGE);
-    gpio_pulldown_en(GPIO_RX_DONE);
-
-    init_rtc_and_ulp();
-    init_433_isr_and_task(sx1278_433_spi);
-
-    /*
-     * SX1276
-     */
-    spi_device_handle_t sx1276_868_spi;
-    spi_device_interface_config_t sx1276_868_cfg = {
-        .command_bits = 8,
-        .clock_speed_hz = SPI_MASTER_FREQ_10M,
-        .mode = 0,
-        .spics_io_num = PIN_NUM_868_CS,
-        .queue_size = 1,
-    };
-    err = spi_bus_add_device(SPI_HOST_ID, &sx1276_868_cfg, &sx1276_868_spi);
-
-    gpio_set_direction(PIN_NUM_868_RST, GPIO_MODE_OUTPUT);
-
-    // SX1276 868MHz RSSI GPIO - ISR for signal detection
-    gpio_set_direction(PIN_NUM_868_DIO0, GPIO_MODE_INPUT);
-    gpio_set_intr_type(PIN_NUM_868_DIO0, GPIO_INTR_POSEDGE);
-    gpio_pulldown_dis(PIN_NUM_868_DIO0);
-    gpio_pullup_dis(PIN_NUM_868_DIO0);
-
-    sx127x_init_fskpacket(sx1276_868_spi, PIN_NUM_868_RST, 868299000, 9600);
-
-    // Attach the interrupt service routine, dio0_rssi_isr(), to DIO0
-    err = gpio_isr_handler_add(PIN_NUM_868_DIO0, dio0_rssi_868_isr, NULL);
-    ESP_ERROR_CHECK(err);
-
-    // SNTP
-    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&sntp_config);
+     * SX127x Radio Implementations
+     */ 
+    init_sx1278_433_ook_raw();
+    init_sx1276_868_fsk_pkt();
 
     // Loop forever
     while(1) {
         vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-        if (gpio_rssi_868_flag) {
-            gpio_rssi_868_flag = 0;
-            printf("[SX127x] 868MHz RSSI Detected\n");
-            uint8_t value = sx127x_read_single(sx1276_868_spi, 0x00);
-            printf("[SX127x] 868MHz Packet Size: %d bytes\n", value);
-            printf("[SX127x] 868MHz Packet Data:");
-            uint8_t y = 0;
-            for (int x = 0; x < value; x++) {
-                y = sx127x_read_single(sx1276_868_spi, 0x00);
-                printf(" %02x", y);
-            }
-            printf("\n");
-        }
     }
 }
