@@ -85,6 +85,12 @@ void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uin
     while((sx127x_read_single(spi, 0x3E) >> 7) & 0x1); // Wait for Mode Ready Cleared
     printf("[SX127x] OpMode: Sleep\n");
 
+    /*
+     * Set the major variables describing the signal profile 
+     * - Bitrate (e.g. 2000 bps)
+     * - Frequency (e.g. 433912000 Hz)
+     * - Bandwidth (e.g. 20 kHz)
+     */
     // Bitrate
     uint16_t raw_bitrate = FXOSC / bitrate;
     sx127x_write_single(spi, 0x02, (raw_bitrate >> 8) & 0xFF);
@@ -96,11 +102,18 @@ void sx127x_init_ookcontinuous(spi_device_handle_t spi, gpio_num_t gpio_rst, uin
     sx127x_write_single(spi, 0x07, (raw_freq >> 8) & 0xFF);
     sx127x_write_single(spi, 0x08, raw_freq & 0xFF);
 
-    // Bandwidth
+    // Bandwidth - 20MHz
     sx127x_write_single(spi, 0x12, RXBWMANT_24 << 3 | RXBWEXP_4);
-    // AFC Bandwidth
+    // AFC Bandwidth - 20MHz
     sx127x_write_single(spi, 0x13, RXBWMANT_24 << 3 | RXBWEXP_4);
 
+    /*
+     * Set the behaviour for raw, continuous OOK reception: 
+     * - Does not restart the RX automatically
+     * - "RSSI detected" on DIO0
+     * - Continous raw signalling on DIO2, with a bit synchroniser for clean signal
+     * - Use OOK Peak detection
+     */
     sx127x_write_single(spi, 0x14, 0x28); // RegOokPeak: Bit sync on, OOK peak, OOKPeakThresStep 0.5dB
     sx127x_write_single(spi, 0x31, 0x00); // RegPacketConfig2: Packet mode off, Continuous on
     sx127x_write_single(spi, 0x40, 0x40); // RegDioMapping1: DIO0 = RSSI
@@ -265,5 +278,4 @@ void sx127x_rxrestart(spi_device_handle_t spi) {
     // Restart without PLL / changes
     value |= 0x40;
     sx127x_cmd(spi, 0x0D, 1, &value, 1);
-    
 }

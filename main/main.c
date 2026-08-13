@@ -31,93 +31,23 @@
 // SNTP
 #include "esp_netif_sntp.h"
 
-// HTTP 
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-
-// ULP for raw radio
-#include "ulp.h"
-#include "ulp/ulp_config.h"
-#include "ulp_data_433.h" 
-
-// RTC GPIO
-#include "driver/rtc_io.h"
-#include "soc/rtc_cntl_reg.h"
-
 #include "sx127x.h"
+
+#include "sx1278_433_ook_raw/sx1278_433_ook_raw.h"
 
 #include "lvgl_ui/lvgl_ui.h"
 #include "otlp_climate/otlp_climate.h"
 
 #include "config.h"
 
-// I2C Basics
-#define PIN_NUM_I2C_SDA 12
-#define PIN_NUM_I2C_SCL 11
-#define I2C_FREQ 400000
-#define I2C_PORT 0
-
-// I2C Addresses
-#define I2C_ADDR_AXP2101 0x34 // PMU
-#define I2C_ADDR_AW9523B 0x58 // GPIO Expander
-
-// Common SPI Defines
-#define SPI_HOST_ID     SPI2_HOST
-#define PIN_NUM_MISO    35
-#define PIN_NUM_MOSI    37
-#define PIN_NUM_CLK     36 
-
-// SD Card Reader
-#define PIN_NUM_SXC_CS      4
-
-// LCD pins
-#define PIN_NUM_LCD_CS      3
-#define PIN_NUM_LCD_DC      35 
-
-// LCD Attributes
-#define LCD_H_RES 320
-#define LCD_V_RES 240
-#define LCD_H_OFF 0
-#define LCD_V_OFF 0
-#define LCD_IMG_SIZE (LCD_H_RES * LCD_V_RES * sizeof(uint16_t))
-
-// LCD backlight via AXP2101 PMU (I2C)
-// LCD reset via AW9523B GPIO Expander (I2C)
-
-/*
- * M5Stack Shims
- */
-
-// RA-02
-#define PIN_NUM_433_CS   18
-#define PIN_NUM_433_RST  17
-#define PIN_NUM_433_DIO0  8
-#define PIN_NUM_433_DIO2  2
-
-// RA-01
-#define PIN_NUM_868_CS    6
-#define PIN_NUM_868_RST   5
-#define PIN_NUM_868_DIO0 10
-
-// Ethernet pins
-#define PIN_NUM_ETH_CS    9
-#define PIN_NUM_ETH_RST   7
-#define PIN_NUM_ETH_INT  14
-
-static bool network_present = false;
+volatile bool network_present = false;
 
 // Flag to indicate ULP has finished processing
-volatile bool gpio_rssi_433_flag = 0;
 volatile bool ulp_rx_done_433_flag = 0;
 
 volatile bool gpio_rssi_868_flag = 0;
 
-static TaskHandle_t sx1278_433_task_handle = NULL;
 static spi_device_handle_t sx1278_433_spi;
-
-// Start and end addr of ULP program in 32bit chunks: 0 (0x0000) - 255 (0x03FF)
-extern const uint8_t bin_start[] asm("_binary_ulp_data_433_bin_start");
-extern const uint8_t bin_end[]   asm("_binary_ulp_data_433_bin_end");
 
 static esp_event_handler_instance_t eth_ev_instance = NULL;
 
@@ -165,104 +95,6 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 
     network_present = true;
 }
-
-/**
- * @brief Interrupt for when RSSI goes high on DIO2
- * @param arg Unused
- */
-static void IRAM_ATTR sx1278_433_ulp_isr(void *arg) {
-    esp_err_t err;
-    gpio_rssi_433_flag = 1;
-    err = ulp_run(&ulp_entry - RTC_SLOW_MEM);
-    ESP_ERROR_CHECK(err);
-}
-
-void sx1278_433_task(void *pvParameters) {
-    spi_device_handle_t spi = (spi_device_handle_t)pvParameters;
-
-    for (;;) {
-        // Wait for ISR call
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        // RXDone
-        if (ulp_state == 1) {
-            esp_err_t err;
-            // Print the RFM ULP variables
-            printf("[SX127x] 433MHz Raw Data: %lld - 0x%04x,0x%04x\n", 
-                esp_timer_get_time() / 1000000,
-                (uint16_t)(&ulp_value)[0], (uint16_t)(&ulp_value)[1]);
-
-            int64_t sensor_id = ((uint16_t)(&ulp_value)[0] >> 8) & 0xFF;
-            uint8_t battery = ((uint16_t)(&ulp_value)[0] >> 7) & 0x1; 
-            uint8_t manual = ((uint16_t)(&ulp_value)[0] >> 6) & 0x1;
-            uint8_t channel = (((uint16_t)(&ulp_value)[0]>> 4) & 0x3) + 1;
-            double temp = (float)((((((uint16_t)(&ulp_value)[0] & 0x7) << 8) | (((uint16_t)(&ulp_value)[1] >> 8) & 0xFF))
-                            ^ (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) + (((uint16_t)(&ulp_value)[0] & 0x8) >> 3)) * 0.1;
-            int64_t humidity = ((uint16_t)(&ulp_value)[1] & 0xFF);
-            printf("[SX127x] 433MHz Parsed Data: Id: 0x%02llx, Bat: %d, Man: %d, Ch: %d, Temp: %.1f°C, RH: %lld%%\n", 
-                sensor_id, battery, manual, channel, temp, humidity);
-
-            char *pb_data = (char *)malloc(sizeof(char) * 1024);
-            size_t pb_len = otlp_climate(pb_data, sensor_id, temp, humidity);
-            otlp_nanopb_print(pb_data, pb_len);
-
-            if (network_present) { 
-                /* 
-                * If SSL verification isn't needed for testing:
-                * - CONFIG_ESP_TLS_INSECURE=y
-                * - CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
-                * 
-                * Otherwise add:
-                * - CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-                * - #include "esp_crt_bundle.h"
-                * - esp_http_client_config_t http_client_config = {
-                *     .crt_bundle_attach = esp_crt_bundle_attach,
-                *   }
-                */
-                esp_http_client_config_t http_client_config = {
-                    .url = OTLP_METRICS_ENDPOINT,
-                    .timeout_ms = 1000,
-                    .crt_bundle_attach = esp_crt_bundle_attach,
-                };
-
-                printf("[HTTP]: Init\n");
-                esp_http_client_handle_t client = esp_http_client_init(&http_client_config);
-                esp_http_client_set_method(client, HTTP_METHOD_POST);
-                esp_http_client_set_header(client, "Content-Type", "application/x-protobuf");
-                esp_http_client_set_header(client, "X-SF-Token", X_SF_TOKEN);
-                esp_http_client_set_post_field(client, pb_data, pb_len);
-                printf("[HTTP]: Perform\n");
-                err = esp_http_client_perform(client);
-                if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "HTTP Status = %d", esp_http_client_get_status_code(client));
-                } else {
-                    ESP_LOGE(TAG, "HTTP Error = %s", esp_err_to_name(err));
-                }
-                printf("[HTTP]: Clean-up\n");
-                esp_http_client_cleanup(client);
-            }
-
-            free(pb_data);
-        }
-        ulp_state = 0; // Set back to running
-        sx127x_write_single(spi, 0x3E, 0x08); // Reset RSSI
-        sx127x_rxrestart(spi);
-    }
-}
-
-/**
- * @brief Interrupt for when the GPIO_RX_DONE goes low, indicating RX complete
- * @param arg SPI Device Handle
- */
-static void IRAM_ATTR sx1278_433_task_isr(void *arg) {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    vTaskNotifyGiveFromISR(sx1278_433_task_handle, &xHigherPriorityTaskWoken);
-
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
-    }
-}  
 
 /**
  * @brief Interrupt for when RSSI goes high on DIO2
@@ -423,55 +255,6 @@ i2c_master_dev_handle_t setup_i2c_dev(i2c_port_num_t i2c_port_num, uint16_t i2c_
     return i2c_dev_handle;
 }
 
-/**
- * @brief Initialise RTC and ULP
- * @param spi SPI Device Handle
- * @param reg Register to interrogate
- * @return `uint8_t` Data
- */
-static void init_rtc_and_ulp(void)
-{
-    esp_err_t err;
-
-    /*
-     * RFM DATA GPIO
-     */
-    gpio_num_t gpio_num = PIN_NUM_433_DIO2;
-    assert(rtc_gpio_is_valid_gpio(gpio_num) && "Not a valid RTC GPIO");
-
-    // Initialise GPIO as RTC GPIO
-    err = rtc_gpio_init(gpio_num);
-    ESP_ERROR_CHECK(err);
-
-    // Set the RTC GPIO to INPUT
-    rtc_gpio_set_direction(gpio_num, RTC_GPIO_MODE_INPUT_ONLY);
-    ESP_ERROR_CHECK(err);
-
-    // Change GPIO, removing pullups and pulldowns
-    rtc_gpio_pulldown_dis(gpio_num);
-    rtc_gpio_pullup_dis(gpio_num);
-
-    /*
-     * ULP Receive Signalling GPIO
-     */
-    gpio_num = GPIO_RX_DONE;
-    assert(rtc_gpio_is_valid_gpio(gpio_num) && "Not a valid RTC GPIO");
-
-    // Initialise GPIO as RTC GPIO
-    err = rtc_gpio_init(gpio_num);
-    ESP_ERROR_CHECK(err);
-
-    // Set the RTC GPIO to INPUT & OUTPUT (main program & ULP respectively)
-    rtc_gpio_set_direction(gpio_num, RTC_GPIO_MODE_INPUT_OUTPUT);
-    ESP_ERROR_CHECK(err);
-
-    /*
-     * ULP Program Upload
-     */
-    err = ulp_load_binary(0, bin_start, (bin_end - bin_start) / sizeof(uint32_t));
-    ESP_ERROR_CHECK(err);
-}
-
 void app_main(void)
 {
     esp_err_t err;
@@ -588,17 +371,7 @@ void app_main(void)
     gpio_pulldown_en(GPIO_RX_DONE);
 
     init_rtc_and_ulp();
-
-    // Start 433 post-processor task
-    xTaskCreate(sx1278_433_task, "433MHz Task", 4096, (void *)sx1278_433_spi, 10, &sx1278_433_task_handle);
-
-    // Attach the interrupt service routine, dio0_rssi_isr(), to DIO0
-    err = gpio_isr_handler_add(PIN_NUM_433_DIO0, sx1278_433_ulp_isr, NULL);
-    ESP_ERROR_CHECK(err);
-
-    // Attach the interrupt service routine, rx_done_isr(), to GPIO_RX_DONE
-    err = gpio_isr_handler_add(GPIO_RX_DONE, sx1278_433_task_isr, (void*)sx1278_433_spi);
-    ESP_ERROR_CHECK(err);
+    init_433_isr_and_task(sx1278_433_spi);
 
     /*
      * SX1276

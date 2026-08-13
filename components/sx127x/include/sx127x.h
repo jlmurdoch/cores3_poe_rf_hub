@@ -1,3 +1,6 @@
+#ifndef SX127X_H
+#define SX127X_H
+
 #include <string.h>             // memset()
 #include "driver/spi_master.h"  // SPI
 #include "freertos/FreeRTOS.h"  
@@ -16,3 +19,5 @@ void sx127x_init_fskpacket(spi_device_handle_t spi, gpio_num_t gpio_rst, uint32_
 void sx127x_ookfixthresh_calibrate(spi_device_handle_t spi, gpio_num_t gpio_dio2, uint32_t bitrate);
 void sx127x_rxrestart(spi_device_handle_t spi);
 void sx127x_rssithresh_calibrate(spi_device_handle_t spi);
+
+#endif
