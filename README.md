@@ -5,7 +5,7 @@ This work-in-progress M5Stack Core setup that is:
 - Powered by Power-over-Ethernet (PoE)
 - Collects a whole manner of RF transmissions:
   - 2.4GHz Wireless 
-  - Bluetooth
+  - Bluetooth (Passive scanning for GAP Advertisements)
   - 433MHz OOK raw signals
   - 868MHz FSK packets (not LoRa)
 
@@ -31,7 +31,7 @@ During desk-testing, the stack was powered with a 12V supply.
 
 Short detail at present:
 - :white_square_button: **ILI9341 Display** - handled by the CoreS3-SE using the LVGL library for graphics.
-- :wireless: **Bluetooth Low Energy (BLE)** - handled by the CoreS3-SE, using the NimBLE library.
+- :wireless: **Bluetooth Low Energy (BLE)** - handled by the CoreS3-SE, using the ESP-IDP port of the NimBLE library to scan for GAP advertisements.
 - :wireless: **SX1278 433MHz** - The SX1278 is tuned to receive raw OOK and it is outputted onto the DIO2 pin, where the [ESP32-S3 ULP](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/ulp-fsm.html) handles the signal processing / timing using assembler.
 - :wireless: **SX1276 868MHz** - The SX1276 is tuned to receive packets, using [interrupts](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/intr_alloc.html) to signal to the main program when valid packets are received.
 - :zap: **W5500 PoE** - Handled by the WIZnet W5500 and main program. 
@@ -40,4 +40,4 @@ Short detail at present:
 - The LCD display updates can be the cause of watchdog timeouts
 - The function `esp_http_client_perform()` has to be implemented outside the main task (`app_main()`):
   - Stack limits (`ESP_MAIN_TASK_STACK_SIZE = 3584`) cause a stack overflow. 
-  - TLS hardware acceleration (`MBEDTLS_HARDWARE_MPI`) creates `wdt timeout` issues. 
+  - TLS hardware acceleration (`MBEDTLS_HARDWARE_MPI`) creates `wdt timeout` issues.

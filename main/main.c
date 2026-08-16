@@ -35,6 +35,9 @@
 // UI
 #include "lvgl_ui/lvgl_ui.h"
 
+// BTHome v2 sensors (BLE GAP)
+#include "bthome/bthome.h"
+
 // Hardware defines
 #include "config.h"
 
@@ -345,6 +348,11 @@ void app_main(void)
      */ 
     init_sx1278_433_ook_raw();
     init_sx1276_868_fsk_pkt();
+
+    /*
+     * BLE GAP Scanning for BTHome Devices
+     */
+    bthome_init();
 
     // Loop forever
     while(1) {
