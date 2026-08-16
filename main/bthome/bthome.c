@@ -1,4 +1,3 @@
-
 /*
  * Simple example of analysing BLE GAP messages from BTHome (bthome.io) devices.
  *
@@ -65,35 +64,35 @@ static void bthome_parse(ble_addr_t addr, const uint8_t *svc_data, uint8_t svc_d
         for (int i = 3; i < svc_data_len; i++) {
             switch (svc_data[i++]) {
                 
-            case 0x00: // Packet ID (counter)
+            case BTHOME_PACKET_ID: // Packet ID (counter)
                 printf("PacketID=%d, ", svc_data[i]);
             break;
 
-            case 0x01: // Battery (percentage)
+            case BTHOME_BATTERY: // Battery (percentage)
                 printf("Battery%%=%d, ", svc_data[i]);
             break;
 
-            case 0x05: // Illuminance (lux)
-                // 0x138A14 - 13460.67 lx
+            case BTHOME_ILLUMINANCE: // Illuminance (lux)
+                // 0x13, 0x8A, 0x14 = 13460.67 lx
                 printf("Illuminance=%0.2f, ", (float)(((uint32_t)svc_data[i]) | ((uint32_t)svc_data[i+1] << 8) | ((uint32_t)svc_data[i+2] << 16)) * 0.01);
-                i += 2;
+                i += 2; // Three-bytes, so increment another two
             break;
 
-            case 0x21: // IR Motion
-                printf("IR Motion=%d, ", svc_data[i]);
+            case BTHOME_MOTION: // Motion: Yes/No
+                printf("Motion=%d, ", svc_data[i]);
             break;
 
-            case 0x2D: // Door: Open/Close
-                printf("Door=%d, ", svc_data[i]);
+            case BTHOME_WINDOW: // Window / door: Open/Close
+                printf("Window=%d, ", svc_data[i]);
             break;
 
-            case 0x3F: // Rotation (degrees)
-                // 0x020C = 307.4 degrees
+            case BTHOME_ROTATION: // Rotation (degrees)
+                // 0x02, 0x0C = 307.4 degrees
                 printf("Rotation=%0.1f, ", (float)(((uint16_t)svc_data[i]) | ((uint16_t)svc_data[i+1] << 8)) * 0.1);
-                i++;
+                i++; // Two-bytes, so increment another one
             break;
 
-            case 0x3A: // Button (press))
+            case BTHOME_BUTTON: // Button (press)
                 printf("Button=%d, ", svc_data[i]);
             break;
 
@@ -115,8 +114,8 @@ static int bthome_gap_event_callback(struct ble_gap_event *event, void *arg) {
             return 0;
         }
 
-        // Look for a Service Data UUID 16-bit message with flag of 0x06 (see main comment)
-        if (adv_fields.flags == 0x06 && 
+        // Look for a Service Data UUID 16-bit message with specific flags(see main comment)
+        if (adv_fields.flags == (BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP) && 
             adv_fields.svc_data_uuid16 != NULL && 
             adv_fields.svc_data_uuid16_len) {
             // UUID is in first two bytes, little endian
